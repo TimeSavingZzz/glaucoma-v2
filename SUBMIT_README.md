@@ -16,6 +16,12 @@
 
 融合公式：每模型视图 softmax 平均 → logit；三模型 logit 按 1.0 : 2.0 : 1.5 加权平均；sigmoid。
 
+权重 SHA-256：
+
+- `CNVS_fp16.pt`：`8723432381a5778cb5abae50c67f69091e30a5c35b3af451f621acc5248c44e2`（99,019,002 B）
+- `EXP09_fp16.pt`：`a1742d84f10426cebbef270e95b3f181199c7f5891b190b6791f47d33ac98866`（47,227,006 B）
+- `EXP12_fp16.pt`：`a7cfac1faf2f22e0dc5a57ae6acf36bffb4796480b46623298862aa29bbb2369`（40,909,452 B）
+
 ## 运行方式
 
 ```bash
