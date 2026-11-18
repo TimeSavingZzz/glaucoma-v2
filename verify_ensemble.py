@@ -36,7 +36,7 @@ def main() -> None:
         names, labels = names[: args.limit], labels[: args.limit]
     paths = pc.resolve_paths(Path(args.data_root), names)
 
-    models, strategies, inf, norms = pc.load_models()
+    models, strategies, inf, norms, weights = pc.load_models()
     ds = pc.ImagePathDataset(paths, inf["image_size"], inf["fov_crop"], inf["input_mode"])
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.workers, pin_memory=True)
@@ -45,7 +45,7 @@ def main() -> None:
     with torch.inference_mode():
         for x in loader:
             probs.append(pc.predict_prob(models, strategies, norms,
-                                         x.to(dev, non_blocking=True)).cpu().numpy())
+                                         x.to(dev, non_blocking=True), weights).cpu().numpy())
     p = np.concatenate(probs)
     print(f"models={len(models)} strategies={strategies} n={len(p)}")
     print(f"AP={average_precision_score(labels, p):.6f} "

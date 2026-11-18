@@ -2,7 +2,7 @@
 
 与训练代码共享预处理（ImageNet 归一化、可选 FOV 裁剪），推理端：
 - 同一模型的多 TTA 视图合并成一个 batch 前向，视图 softmax 平均；
-- 跨模型对 logit 等权平均，再 sigmoid；
+- 跨模型对 logit 加权平均（默认等权），再 sigmoid；
 - FP16 权重 + channels_last；cost.py 与 predict 使用同一推理函数（本文件 --timing 模式）。
 """
 
@@ -31,21 +31,23 @@ MEAN = (0.485, 0.456, 0.406)
 STD = (0.229, 0.224, 0.225)
 _TO_TENSOR = transforms.Compose([transforms.ToTensor()])  # 归一化在 GPU 上按模型配置做
 
-# (权重路径, TTA 策略) —— 训练完成后按 valid 结果填写
-MODELS: tuple[tuple[str, str], ...] = ()
+# (权重路径, TTA 策略, 融合权重) —— 训练完成后按 valid 结果填写
+MODELS: tuple[tuple[str, str, float], ...] = ()
 MODEL_DIR = Path(__file__).resolve().parent / "model"
 USE_FP16 = True
 
 
-def active_models() -> tuple[tuple[str, str], ...]:
-    """环境变量 GLAUCOMA_MODELS="路径::tta,路径::tta" 可临时覆盖。"""
+def active_models() -> tuple[tuple[str, str, float], ...]:
+    """环境变量 GLAUCOMA_MODELS="路径::tta::权重,..." 可临时覆盖。"""
     spec = os.environ.get("GLAUCOMA_MODELS", "").strip()
     if not spec:
         return MODELS
     out = []
     for item in spec.split(","):
-        name, _, tta = item.partition("::")
-        out.append((name.strip(), (tta or "none").strip()))
+        parts = [p.strip() for p in item.split("::")]
+        name, tta = parts[0], (parts[1] if len(parts) > 1 and parts[1] else "none")
+        weight = float(parts[2]) if len(parts) > 2 and parts[2] else 1.0
+        out.append((name, tta, weight))
     return tuple(out)
 
 
@@ -119,8 +121,8 @@ def build_any(arch: str, image_size: int) -> nn.Module:
 
 def load_models(model_dir: Path = MODEL_DIR):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    models, strategies, infos, norms = [], [], [], []
-    for name, tta in active_models():
+    models, strategies, weights, infos, norms = [], [], [], [], []
+    for name, tta, weight in active_models():
         path = Path(name) if Path(name).is_absolute() else model_dir / name
         if not path.is_file():
             raise SystemExit(f"缺少权重: {path}")
@@ -134,6 +136,7 @@ def load_models(model_dir: Path = MODEL_DIR):
         model.eval()
         models.append(model)
         strategies.append(tta)
+        weights.append(weight)
         infos.append(inf)
         norms.append((torch.tensor(inf["mean"], device=device).view(1, 3, 1, 1),
                       torch.tensor(inf["std"], device=device).view(1, 3, 1, 1)))
@@ -142,7 +145,7 @@ def load_models(model_dir: Path = MODEL_DIR):
         for k in ("image_size", "fov_crop", "input_mode"):
             if inf[k] != first[k]:
                 raise SystemExit(f"权重输入配置不一致: {k} {inf[k]} vs {first[k]}")
-    return models, strategies, first, norms
+    return models, strategies, first, norms, weights
 
 
 def views(x: torch.Tensor, tta: str) -> list[torch.Tensor]:
@@ -156,16 +159,19 @@ def views(x: torch.Tensor, tta: str) -> list[torch.Tensor]:
     raise ValueError(f"未知 TTA: {tta}")
 
 
-def predict_prob(models, strategies, norms, x: torch.Tensor) -> torch.Tensor:
+def predict_prob(models, strategies, norms, x: torch.Tensor, weights=None) -> torch.Tensor:
     """x 为未归一化的 [0,1] 图像；每个模型按自身预训练配置归一化。"""
-    model_logits = []
-    for model, strategy, (mean, std) in zip(models, strategies, norms):
+    if weights is None:
+        weights = [1.0] * len(models)
+    model_logits, wsum = [], 0.0
+    for model, strategy, (mean, std), w in zip(models, strategies, norms, weights):
         vs = [(v - mean) / std for v in views(x, strategy)]
         dtype = next(model.parameters()).dtype
         batch = torch.cat(vs, dim=0).to(dtype=dtype).contiguous(memory_format=torch.channels_last)
         probs = torch.softmax(model(batch).float(), dim=1)[:, 1].view(len(vs), x.size(0))
-        model_logits.append(torch.logit(probs.mean(dim=0).clamp(1e-6, 1 - 1e-6)))
-    return torch.sigmoid(torch.stack(model_logits).mean(dim=0))
+        model_logits.append(w * torch.logit(probs.mean(dim=0).clamp(1e-6, 1 - 1e-6)))
+        wsum += w
+    return torch.sigmoid(sum(model_logits) / wsum)
 
 
 def resolve_paths(data_root: Path, names: list[str]) -> list[Path]:
@@ -206,7 +212,7 @@ def main() -> None:
     names = read_meta(args.meta)["Image_name"].astype(str).tolist()
     paths = resolve_paths(data_root, names)
 
-    models, strategies, inf, norms = load_models()
+    models, strategies, inf, norms, weights = load_models()
     size = inf["image_size"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.benchmark = False
@@ -214,7 +220,7 @@ def main() -> None:
     with torch.inference_mode():
         for p in paths[: args.warmup]:
             x = load_image_tensor(p, size, inf["fov_crop"], inf["input_mode"]).unsqueeze(0).to(device)
-            predict_prob(models, strategies, norms, x)
+            predict_prob(models, strategies, norms, x, weights)
     torch.cuda.synchronize()
 
     rest = list(range(len(paths)))[args.warmup:]
@@ -226,7 +232,7 @@ def main() -> None:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             x = load_image_tensor(paths[i], size, inf["fov_crop"], inf["input_mode"]).unsqueeze(0).to(device)
-            p = predict_prob(models, strategies, norms, x)
+            p = predict_prob(models, strategies, norms, x, weights)
             torch.cuda.synchronize()
             costs.append((time.perf_counter() - t0) * 1000.0)
             _ = float(p[0])
@@ -245,7 +251,7 @@ def main() -> None:
     probs = []
     with torch.inference_mode():
         for x in loader:
-            probs.append(predict_prob(models, strategies, norms, x.to(device, non_blocking=True)).cpu().numpy())
+            probs.append(predict_prob(models, strategies, norms, x.to(device, non_blocking=True), weights).cpu().numpy())
     prob = np.concatenate(probs)
     frame = pd.DataFrame({"Image_name": names,
                           "Probability": np.round(prob, 9),
