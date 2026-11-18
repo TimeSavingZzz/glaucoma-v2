@@ -143,6 +143,8 @@ def main() -> None:
     parser.add_argument("--no-amp", dest="amp", action="store_false")
     parser.add_argument("--clip", type=float, default=1.0)
     parser.add_argument("--label-smooth", type=float, default=0.0)
+    parser.add_argument("--rank-weight", type=float, default=0.0,
+                        help="pairwise logistic 排序损失权重（0 关闭，旧配方用 0.5）")
     parser.add_argument("--train-csv", default="")
     parser.add_argument("--train-dir", default="")
     parser.add_argument("--valid-csv", default="")
@@ -283,7 +285,14 @@ def main() -> None:
             y = y.to(device, non_blocking=True)
             with torch.cuda.amp.autocast(enabled=args.amp):
                 logits = model(x)
-                loss = criterion(logits, y) / args.accum
+                loss = criterion(logits, y)
+                if args.rank_weight > 0:
+                    z = logits[:, 1] - logits[:, 0]
+                    zp, zn = z[y == 1], z[y == 0]
+                    if zp.numel() and zn.numel():
+                        rank = F.softplus(-(zp[:, None] - zn[None, :])).mean()
+                        loss = loss + args.rank_weight * rank
+                loss = loss / args.accum
             scaler.scale(loss).backward()
             if step % args.accum == 0:
                 if args.clip > 0:
