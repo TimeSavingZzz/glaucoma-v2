@@ -31,8 +31,12 @@ MEAN = (0.485, 0.456, 0.406)
 STD = (0.229, 0.224, 0.225)
 _TO_TENSOR = transforms.Compose([transforms.ToTensor()])  # 归一化在 GPU 上按模型配置做
 
-# (权重路径, TTA 策略, 融合权重) —— 训练完成后按 valid 结果填写
-MODELS: tuple[tuple[str, str, float], ...] = ()
+# (权重路径, TTA 策略, 融合权重) —— valid AP 0.8882 / AUROC 0.9929，最终配方
+MODELS: tuple[tuple[str, str, float], ...] = (
+    ("model/CNVS_fp16.pt", "hflip", 1.0),
+    ("model/EXP09_fp16.pt", "hv", 2.0),
+    ("model/EXP12_fp16.pt", "hflip", 1.5),
+)
 MODEL_DIR = Path(__file__).resolve().parent / "model"
 USE_FP16 = True
 
