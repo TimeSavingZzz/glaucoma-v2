@@ -92,16 +92,20 @@ def load_image_tensor(path, size, fov_crop=False, input_mode="rgb") -> torch.Ten
         return _TO_TENSOR(im)
 
 
-class ImagePathDataset(Dataset):
-    def __init__(self, paths, size, fov_crop, input_mode):
-        self.paths, self.size = paths, size
+class MultiSizeDataset(Dataset):
+    """同一张图按各模型所需尺寸各解码一次，collate 后得到 {size: [B,3,S,S]}。"""
+
+    def __init__(self, paths, sizes, fov_crop, input_mode):
+        self.paths = paths
+        self.sizes = sorted(set(int(s) for s in sizes))
         self.fov_crop, self.input_mode = fov_crop, input_mode
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, idx):
-        return load_image_tensor(self.paths[idx], self.size, self.fov_crop, self.input_mode)
+        return {s: load_image_tensor(self.paths[idx], s, self.fov_crop, self.input_mode)
+                for s in self.sizes}
 
 
 def _infer_config(ckpt: dict) -> dict:
@@ -145,12 +149,12 @@ def load_models(model_dir: Path = MODEL_DIR):
         infos.append(inf)
         norms.append((torch.tensor(inf["mean"], device=device).view(1, 3, 1, 1),
                       torch.tensor(inf["std"], device=device).view(1, 3, 1, 1)))
-    first = infos[0]
+    # 允许混合分辨率；FOV 裁剪与输入通道必须一致
     for inf in infos[1:]:
-        for k in ("image_size", "fov_crop", "input_mode"):
-            if inf[k] != first[k]:
-                raise SystemExit(f"权重输入配置不一致: {k} {inf[k]} vs {first[k]}")
-    return models, strategies, first, norms, weights
+        for k in ("fov_crop", "input_mode"):
+            if inf[k] != infos[0][k]:
+                raise SystemExit(f"权重输入配置不一致: {k} {inf[k]} vs {infos[0][k]}")
+    return models, strategies, infos, norms, weights
 
 
 def views(x: torch.Tensor, tta: str) -> list[torch.Tensor]:
@@ -164,16 +168,19 @@ def views(x: torch.Tensor, tta: str) -> list[torch.Tensor]:
     raise ValueError(f"未知 TTA: {tta}")
 
 
-def predict_prob(models, strategies, norms, x: torch.Tensor, weights=None) -> torch.Tensor:
-    """x 为未归一化的 [0,1] 图像；每个模型按自身预训练配置归一化。"""
+def predict_prob(models, strategies, infos, norms, x, weights=None) -> torch.Tensor:
+    """x 为未归一化的 [0,1] 图像（单尺寸 Tensor 或 {size: Tensor}）；各模型按自身配置归一化。"""
     if weights is None:
         weights = [1.0] * len(models)
+    if not isinstance(x, dict):
+        x = {infos[0]["image_size"]: x}
     model_logits, wsum = [], 0.0
-    for model, strategy, (mean, std), w in zip(models, strategies, norms, weights):
-        vs = [(v - mean) / std for v in views(x, strategy)]
+    for model, strategy, inf, (mean, std), w in zip(models, strategies, infos, norms, weights):
+        xb = x[inf["image_size"]]
+        vs = [(v - mean) / std for v in views(xb, strategy)]
         dtype = next(model.parameters()).dtype
         batch = torch.cat(vs, dim=0).to(dtype=dtype).contiguous(memory_format=torch.channels_last)
-        probs = torch.softmax(model(batch).float(), dim=1)[:, 1].view(len(vs), x.size(0))
+        probs = torch.softmax(model(batch).float(), dim=1)[:, 1].view(len(vs), xb.size(0))
         model_logits.append(w * torch.logit(probs.mean(dim=0).clamp(1e-6, 1 - 1e-6)))
         wsum += w
     return torch.sigmoid(sum(model_logits) / wsum)
@@ -217,15 +224,19 @@ def main() -> None:
     names = read_meta(args.meta)["Image_name"].astype(str).tolist()
     paths = resolve_paths(data_root, names)
 
-    models, strategies, inf, norms, weights = load_models()
-    size = inf["image_size"]
+    models, strategies, infos, norms, weights = load_models()
+    sizes = sorted({inf["image_size"] for inf in infos})
+    fov_crop, input_mode = infos[0]["fov_crop"], infos[0]["input_mode"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.benchmark = False
 
+    def load_multi(p):
+        return {s: load_image_tensor(p, s, fov_crop, input_mode).unsqueeze(0).to(device)
+                for s in sizes}
+
     with torch.inference_mode():
         for p in paths[: args.warmup]:
-            x = load_image_tensor(p, size, inf["fov_crop"], inf["input_mode"]).unsqueeze(0).to(device)
-            predict_prob(models, strategies, norms, x, weights)
+            predict_prob(models, strategies, infos, norms, load_multi(p), weights)
     torch.cuda.synchronize()
 
     rest = list(range(len(paths)))[args.warmup:]
@@ -236,8 +247,7 @@ def main() -> None:
         for i in timed_idx:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            x = load_image_tensor(paths[i], size, inf["fov_crop"], inf["input_mode"]).unsqueeze(0).to(device)
-            p = predict_prob(models, strategies, norms, x, weights)
+            p = predict_prob(models, strategies, infos, norms, load_multi(paths[i]), weights)
             torch.cuda.synchronize()
             costs.append((time.perf_counter() - t0) * 1000.0)
             _ = float(p[0])
@@ -250,13 +260,14 @@ def main() -> None:
     if args.timing:
         return
 
-    loader = DataLoader(ImagePathDataset(paths, size, inf["fov_crop"], inf["input_mode"]),
+    loader = DataLoader(MultiSizeDataset(paths, sizes, fov_crop, input_mode),
                         batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
                         pin_memory=True, persistent_workers=args.workers > 0)
     probs = []
     with torch.inference_mode():
-        for x in loader:
-            probs.append(predict_prob(models, strategies, norms, x.to(device, non_blocking=True), weights).cpu().numpy())
+        for batch in loader:
+            xs = {s: t.to(device, non_blocking=True) for s, t in batch.items()}
+            probs.append(predict_prob(models, strategies, infos, norms, xs, weights).cpu().numpy())
     prob = np.concatenate(probs)
     frame = pd.DataFrame({"Image_name": names,
                           "Probability": np.round(prob, 9),
