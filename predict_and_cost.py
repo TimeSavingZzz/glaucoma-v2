@@ -31,12 +31,12 @@ MEAN = (0.485, 0.456, 0.406)
 STD = (0.229, 0.224, 0.225)
 _TO_TENSOR = transforms.Compose([transforms.ToTensor()])  # 归一化在 GPU 上按模型配置做
 
-# (权重路径, TTA 策略, 融合权重) —— valid AP 0.8933 / AUROC 0.9930，最终配方
+# (权重路径, TTA 策略, 融合权重) —— valid AP 0.8934 / AUROC 0.9930，7 视图最终配方
 MODELS: tuple[tuple[str, str, float], ...] = (
-    ("CNVS_fp16.pt", "hflip", 0.5),
-    ("EM4b_fp16.pt", "none", 1.5),
-    ("EXP09_fp16.pt", "hv", 2.0),
-    ("EXP12_fp16.pt", "hflip", 1.0),
+    ("CNVS_fp16.pt", "none", 1.0),
+    ("EM4b_fp16.pt", "none", 3.0),
+    ("EXP09_fp16.pt", "hv", 4.0),
+    ("EXP12_fp16.pt", "none", 2.0),
 )
 MODEL_DIR = Path(__file__).resolve().parent / "model"
 USE_FP16 = True
