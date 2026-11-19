@@ -152,6 +152,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--eval-batch", type=int, default=16)
     parser.add_argument("--run-dir", default="")
+    parser.add_argument("--init-ckpt", default="",
+                        help="从已有 checkpoint 初始化权重（高分辨率微调/继续训练）")
     parser.add_argument("--extra-csv", default="", help="额外训练数据（如 valid 并入训练）")
     parser.add_argument("--extra-dir", default="")
     parser.add_argument("--skip-valid", action="store_true",
@@ -237,6 +239,15 @@ def main() -> None:
 
     model = build_model(args.arch, num_classes=2, pretrained=True, image_size=args.size,
                         drop_path=args.drop_path).to(device, memory_format=torch.channels_last)
+    if args.init_ckpt:
+        init = torch.load(args.init_ckpt, map_location="cpu", weights_only=False)
+        init_sd = init.get("model", init)
+        missing, unexpected = model.load_state_dict(init_sd, strict=False)
+        real_missing = [k for k in missing if "head" not in k]
+        if real_missing or unexpected:
+            raise SystemExit(f"init-ckpt 不匹配: missing={real_missing[:5]} unexpected={unexpected[:5]}")
+        log(f"init from {args.init_ckpt} (epoch={init.get('epoch')}, "
+            f"skipped={len(missing)} head keys)")
     if distributed:
         if args.syncbn:
             model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
