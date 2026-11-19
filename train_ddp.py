@@ -275,7 +275,8 @@ def main() -> None:
     best_au, best_au_epoch = -1.0, 0
     bad = 0
     global_step = 0
-    warmup_steps = max(0, args.warmup_epochs) * len(train_loader)
+    # global_step 按优化步计数（每 accum 个 batch 一次），warmup 必须换算成优化步
+    warmup_steps = max(0, args.warmup_epochs) * (len(train_loader) // max(1, args.accum))
     start = time.perf_counter()
 
     for epoch in range(1, args.epochs + 1):
