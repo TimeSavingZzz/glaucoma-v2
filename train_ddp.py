@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from config import IMAGE_SIZE, RUNS_DIR, SEED, VALID_CSV, VALID_DIR
 from dataset import DistributedWeightedSampler, GlaucomaDataset, _worker_init_fn
-from models import build_model, data_norm
+from models import build_model as build_timm_model, data_norm as timm_data_norm
 
 
 def set_seed(seed: int) -> None:
@@ -116,6 +116,25 @@ def save_ckpt(obj: dict, path: Path) -> None:
     os.replace(tmp, str(path))
 
 
+IMAGENET_MEAN_STD = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+
+
+def build_train_model(arch: str, size: int, drop_path: float):
+    """timm 骨干走 models.build_model，torchvision 骨干（resnet50 等）走 torchvision_models。"""
+    if "." in arch:
+        return build_timm_model(arch, num_classes=2, pretrained=True, image_size=size,
+                                drop_path=drop_path)
+    import torchvision_models
+    return torchvision_models.build_model(num_classes=2, pretrained=True, arch=arch,
+                                          image_size=size)
+
+
+def train_data_norm(arch: str):
+    if "." in arch:
+        return timm_data_norm(arch)
+    return IMAGENET_MEAN_STD
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp-id", default="V2")
@@ -171,7 +190,7 @@ def main() -> None:
         torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     is_main = rank == 0
-    mean, std = data_norm(args.arch)
+    mean, std = train_data_norm(args.arch)
 
     from config import TRAIN_CSV, TRAIN_DIR
     train_csv = Path(args.train_csv) if args.train_csv else TRAIN_CSV
@@ -246,8 +265,8 @@ def main() -> None:
         counts = {int(v): int(c) for v, c in zip(vals, cnts)}
     log(f"train={len(train_ds)} {counts} batches/gpu={len(train_loader)}")
 
-    model = build_model(args.arch, num_classes=2, pretrained=True, image_size=args.size,
-                        drop_path=args.drop_path).to(device, memory_format=torch.channels_last)
+    model = build_train_model(args.arch, args.size, args.drop_path).to(
+        device, memory_format=torch.channels_last)
     if args.init_ckpt:
         init = torch.load(args.init_ckpt, map_location="cpu", weights_only=False)
         init_sd = init.get("model", init)
