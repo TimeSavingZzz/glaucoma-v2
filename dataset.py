@@ -216,9 +216,11 @@ class DistributedWeightedSampler(Sampler):
     def __len__(self):
         return self.num_samples * self.num_replicas
 
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
     def __iter__(self):
         g = np.random.default_rng(self.seed + self.epoch)
-        self.epoch += 1
         idx = g.choice(len(self.weights), size=self.num_samples * self.num_replicas,
                        replace=True, p=self.weights)
         lo = self.rank * self.num_samples
