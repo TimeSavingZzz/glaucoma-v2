@@ -29,7 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 from config import IMAGE_SIZE, RUNS_DIR, SEED, VALID_CSV, VALID_DIR
-from dataset import GlaucomaDataset, _worker_init_fn
+from dataset import DistributedWeightedSampler, GlaucomaDataset, _worker_init_fn
 from models import build_model, data_norm
 
 
@@ -145,6 +145,8 @@ def main() -> None:
     parser.add_argument("--label-smooth", type=float, default=0.0)
     parser.add_argument("--rank-weight", type=float, default=0.0,
                         help="pairwise logistic 排序损失权重（0 关闭，旧配方用 0.5）")
+    parser.add_argument("--pos-weight", type=float, default=1.0,
+                        help="正类过采样权重（1 关闭；4 约把正类比例提升到 12%%）")
     parser.add_argument("--train-csv", default="")
     parser.add_argument("--train-dir", default="")
     parser.add_argument("--valid-csv", default="")
@@ -213,8 +215,14 @@ def main() -> None:
     val_ds = GlaucomaDataset(valid_csv, valid_dir, image_size=args.size, train=False,
                              limit=args.limit, fov_crop=args.fov_crop,
                              input_mode=args.input_mode, mean=mean, std=std) if (is_main and not args.skip_valid) else None
-    sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank,
-                                 shuffle=True, drop_last=True) if distributed else None
+    if distributed and args.pos_weight > 1.0:
+        labels = train_ds.labels if hasattr(train_ds, "labels") else np.concatenate(
+            [d.labels for d in train_ds.datasets])
+        sampler = DistributedWeightedSampler(labels, world, rank,
+                                             pos_weight=args.pos_weight, seed=args.seed)
+    else:
+        sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank,
+                                     shuffle=True, drop_last=True) if distributed else None
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=sampler is None, sampler=sampler,
         drop_last=True, num_workers=args.workers, pin_memory=True,
@@ -228,7 +236,8 @@ def main() -> None:
     log("=" * 72)
     log(f"run_dir={run_dir} world={world} arch={args.arch} size={args.size} "
         f"bs/gpu={args.batch_size} accum={args.accum} epochs={args.epochs} lr={args.lr} "
-        f"wd={args.weight_decay} aug={args.aug} amp={args.amp} ema={not args.no_ema}")
+        f"wd={args.weight_decay} aug={args.aug} amp={args.amp} ema={not args.no_ema} "
+        f"pos_weight={args.pos_weight}")
     if hasattr(train_ds, "label_counts"):
         counts = train_ds.label_counts()
     else:

@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from torchvision import transforms
 
 from config import IMAGENET_MEAN, IMAGENET_STD
@@ -193,6 +193,38 @@ class BoundedPosBatchSampler:
             batch = take(pos_pool, self.pos, self.pos_per_batch, pos_order)
             batch += take(neg_pool, self.neg, n_neg, neg_order)
             yield [batch[i] for i in rng.permutation(len(batch))]
+
+
+class DistributedWeightedSampler(Sampler):
+    """DDP 下按类别加权的采样器：正类被抽中的概率乘以 pos_weight。
+
+    每轮从全量索引有放回抽样 len(dataset) 个，再按 rank 等分，
+    因此各 rank 互不重叠、每轮总样本量与原数据一致。
+    """
+
+    def __init__(self, labels, num_replicas, rank, pos_weight=1.0, seed=42):
+        labels = np.asarray(labels)
+        w = np.ones(len(labels), dtype=np.float64)
+        w[labels == 1] = float(pos_weight)
+        self.weights = w / w.sum()
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.seed = int(seed)
+        self.epoch = 0
+        self.num_samples = int(math.ceil(len(labels) / self.num_replicas))
+
+    def __len__(self):
+        return self.num_samples * self.num_replicas
+
+    def __iter__(self):
+        g = np.random.default_rng(self.seed + self.epoch)
+        self.epoch += 1
+        idx = g.choice(len(self.weights), size=self.num_samples * self.num_replicas,
+                       replace=True, p=self.weights)
+        lo = self.rank * self.num_samples
+        return iter(idx[lo:lo + self.num_samples].tolist())
+
+
 
 
 def build_loader(csv_path, image_dir, image_size, batch_size, train, num_workers=8,
