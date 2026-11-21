@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""加权 logit 融合搜索：在若干 npz 概率缓存上枚举小权重网格。"""
+"""加权 logit 融合搜索：在若干 npz 概率缓存上枚举小权重网格。
+
+用法：
+  python weighted_ens.py a.npz b.npz ... [--grid 0,1,2] [--top 12]
+"""
+import argparse
 import itertools
-import sys
 
 import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -13,7 +17,12 @@ def logit(p):
 
 
 def main():
-    files = sys.argv[1:]
+    ap = argparse.ArgumentParser()
+    ap.add_argument("files", nargs="+")
+    ap.add_argument("--grid", default="0,0.5,1,1.5,2")
+    ap.add_argument("--top", type=int, default=12)
+    args = ap.parse_args()
+    files = args.files
     items, y = [], None
     for f in files:
         d = np.load(f)
@@ -25,7 +34,7 @@ def main():
         print(f"{name:28s} AP={average_precision_score(y, d['probs']):.4f} "
               f"AUROC={roc_auc_score(y, d['probs']):.4f}")
 
-    grid = [0.0, 0.5, 1.0, 1.5, 2.0]
+    grid = [float(x) for x in args.grid.split(",")]
     res = []
     for ws in itertools.product(grid, repeat=len(items)):
         if sum(ws) == 0:
@@ -35,7 +44,7 @@ def main():
         res.append((average_precision_score(y, p), roc_auc_score(y, p), ws))
     res.sort(key=lambda x: -x[0])
     print("\nTOP weighted (AP):")
-    for apv, aucv, ws in res[:12]:
+    for apv, aucv, ws in res[: args.top]:
         label = " ".join(f"{w:g}x{n}" for w, (n, _) in zip(ws, items) if w > 0)
         print(f"AP={apv:.4f} AUROC={aucv:.4f}  {label}")
     top_au = sorted(res, key=lambda x: -x[1])[:6]
