@@ -79,6 +79,7 @@ def read_meta(path: str | Path) -> pd.DataFrame:
 
 def load_image_tensor(path, size, fov_crop=False, input_mode="rgb") -> torch.Tensor:
     from fov import crop_to_square
+    from preprocess import clahe_rgb
     with Image.open(path) as im:
         im.draft("RGB", (1024, 1024) if fov_crop else (size, size))
         im = im.convert("RGB")
@@ -86,6 +87,8 @@ def load_image_tensor(path, size, fov_crop=False, input_mode="rgb") -> torch.Ten
             im = im.getchannel("G").convert("RGB")
         elif input_mode == "gray":
             im = im.convert("L").convert("RGB")
+        elif input_mode == "clahe":
+            im = clahe_rgb(im)
         if fov_crop:
             im = crop_to_square(im)
         im = im.resize((size, size), Image.Resampling.BILINEAR)

@@ -15,8 +15,9 @@ from torchvision import transforms
 
 from config import IMAGENET_MEAN, IMAGENET_STD
 from fov import crop_to_square
+from preprocess import clahe_rgb
 
-AUG_MODES = ("basic", "geo", "geo2", "zoom")
+AUG_MODES = ("basic", "geo", "geo2", "zoom", "strong")
 
 
 def _index_images(image_dir: Path) -> dict[str, str]:
@@ -59,7 +60,7 @@ class GlaucomaDataset(Dataset):
         if aug not in AUG_MODES:
             raise ValueError(f"未知 aug 模式: {aug}（可选: {AUG_MODES}）")
         self.aug = aug
-        if input_mode not in ("rgb", "green", "gray"):
+        if input_mode not in ("rgb", "green", "gray", "clahe"):
             raise ValueError(f"未知 input_mode: {input_mode}")
         self.input_mode = input_mode
 
@@ -103,6 +104,21 @@ class GlaucomaDataset(Dataset):
                     ),
                     transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10, hue=0.02),
                 ]
+            elif self.aug == "strong":
+                ops = [
+                    transforms.RandomResizedCrop(
+                        image_size, scale=(0.7, 1.0), ratio=(0.85, 1.15),
+                        interpolation=transforms.InterpolationMode.BILINEAR,
+                    ),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    transforms.RandomAffine(
+                        degrees=15, translate=(0.04, 0.04), scale=(0.9, 1.1),
+                        shear=5, fill=0,
+                    ),
+                    transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.2, hue=0.03),
+                    transforms.RandAugment(num_ops=2, magnitude=7),
+                ]
             else:  # zoom
                 ops = [
                     transforms.RandomResizedCrop(
@@ -137,6 +153,8 @@ class GlaucomaDataset(Dataset):
                 im = im.getchannel("G").convert("RGB")
             elif self.input_mode == "gray":
                 im = im.convert("L").convert("RGB")
+            elif self.input_mode == "clahe":
+                im = clahe_rgb(im)
             if self.fov_crop:
                 im = crop_to_square(im)
             side = 1024 if zoom else self.image_size
