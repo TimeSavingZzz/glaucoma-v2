@@ -171,13 +171,13 @@ def views(x: torch.Tensor, tta: str) -> list[torch.Tensor]:
     raise ValueError(f"未知 TTA: {tta}")
 
 
-def predict_prob(models, strategies, infos, norms, x, weights=None) -> torch.Tensor:
-    """x 为未归一化的 [0,1] 图像（单尺寸 Tensor 或 {size: Tensor}）；各模型按自身配置归一化。"""
+def predict_logits(models, strategies, infos, norms, x, weights=None) -> torch.Tensor:
+    """返回 [模型数, batch] 的加权 logit；x 为未归一化 [0,1] 图像。"""
     if weights is None:
         weights = [1.0] * len(models)
     if not isinstance(x, dict):
         x = {infos[0]["image_size"]: x}
-    model_logits, wsum = [], 0.0
+    model_logits = []
     for model, strategy, inf, (mean, std), w in zip(models, strategies, infos, norms, weights):
         xb = x[inf["image_size"]]
         vs = [(v - mean) / std for v in views(xb, strategy)]
@@ -185,8 +185,15 @@ def predict_prob(models, strategies, infos, norms, x, weights=None) -> torch.Ten
         batch = torch.cat(vs, dim=0).to(dtype=dtype).contiguous(memory_format=torch.channels_last)
         probs = torch.softmax(model(batch).float(), dim=1)[:, 1].view(len(vs), xb.size(0))
         model_logits.append(w * torch.logit(probs.mean(dim=0).clamp(1e-6, 1 - 1e-6)))
-        wsum += w
-    return torch.sigmoid(sum(model_logits) / wsum)
+    return torch.stack(model_logits, dim=0)
+
+
+def predict_prob(models, strategies, infos, norms, x, weights=None) -> torch.Tensor:
+    """x 为未归一化的 [0,1] 图像（单尺寸 Tensor 或 {size: Tensor}）；各模型按自身配置归一化。"""
+    if weights is None:
+        weights = [1.0] * len(models)
+    return torch.sigmoid(predict_logits(models, strategies, infos, norms, x, weights).sum(0)
+                         / float(sum(weights)))
 
 
 def resolve_paths(data_root: Path, names: list[str]) -> list[Path]:
@@ -220,6 +227,8 @@ def main() -> None:
     ap.add_argument("--n_timed", type=int, default=100)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timing", action="store_true", help="只跑耗时测试")
+    ap.add_argument("--zscore", action="store_true",
+                    help="z-score 融合：先按 test 自身逐模型 logit 标准化再加权（无监督）")
     args = ap.parse_args()
 
     data_root, out_dir = Path(args.data_root), Path(args.out_dir)
@@ -266,12 +275,16 @@ def main() -> None:
     loader = DataLoader(MultiSizeDataset(paths, sizes, fov_crop, input_mode),
                         batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
                         pin_memory=True, persistent_workers=args.workers > 0)
-    probs = []
+    logits = []
     with torch.inference_mode():
         for batch in loader:
             xs = {s: t.to(device, non_blocking=True) for s, t in batch.items()}
-            probs.append(predict_prob(models, strategies, infos, norms, xs, weights).cpu().numpy())
-    prob = np.concatenate(probs)
+            logits.append(predict_logits(models, strategies, infos, norms, xs, weights).cpu())
+    L = torch.cat(logits, dim=1).float().numpy()
+    if args.zscore:
+        L = (L - L.mean(axis=1, keepdims=True)) / (L.std(axis=1, keepdims=True) + 1e-12)
+        print("zscore 融合：按 test 自身逐模型 logit 标准化")
+    prob = 1.0 / (1.0 + np.exp(-(L.sum(axis=0) / float(sum(weights)))))
     frame = pd.DataFrame({"Image_name": names,
                           "Probability": np.round(prob, 9),
                           "Pred_Label": (prob >= args.threshold).astype(np.int64)})
