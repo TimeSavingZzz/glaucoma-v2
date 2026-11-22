@@ -17,7 +17,7 @@ from config import IMAGENET_MEAN, IMAGENET_STD
 from fov import crop_to_square
 from preprocess import clahe_rgb
 
-AUG_MODES = ("basic", "geo", "geo2", "zoom", "strong")
+AUG_MODES = ("basic", "geo", "geo2", "zoom", "zoomrobust", "strong")
 
 
 def _index_images(image_dir: Path) -> dict[str, str]:
@@ -33,6 +33,31 @@ def _worker_init_fn(worker_id: int) -> None:
     seed = torch.initial_seed() % (2 ** 32)
     random.seed(seed)
     np.random.seed(seed)
+
+
+
+class _RandomZoomOut:
+    """随机缩小 + 黑边回填：模拟 test 端视盘占画面更小的成像尺度。
+
+    torchvision 的 RandZoomOut 只用于检测框数据；这里对 PIL 图直接实现：
+    以概率 p 把图缩小到 scale 范围内，再随机粘贴到原尺寸黑色画布上。
+    """
+
+    def __init__(self, scale=(0.8, 1.0), p=0.3, fill=0):
+        self.scale = tuple(scale)
+        self.p = float(p)
+        self.fill = fill
+
+    def __call__(self, im):
+        if random.random() >= self.p:
+            return im
+        w, h = im.size
+        s = random.uniform(*self.scale)
+        nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+        small = im.resize((nw, nh), Image.Resampling.BILINEAR)
+        canvas = Image.new(im.mode, (w, h), self.fill)
+        canvas.paste(small, (random.randint(0, w - nw), random.randint(0, h - nh)))
+        return canvas
 
 
 class GlaucomaDataset(Dataset):
@@ -104,6 +129,21 @@ class GlaucomaDataset(Dataset):
                     ),
                     transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10, hue=0.02),
                 ]
+            elif self.aug == "zoomrobust":
+                # EXP-46 配方：zoomlite 放大 + 缩小黑边回填 双向尺度扰动
+                ops = [
+                    transforms.RandomResizedCrop(
+                        image_size, scale=(0.65, 1.0), ratio=(0.9, 1.1),
+                        interpolation=transforms.InterpolationMode.BILINEAR,
+                    ),
+                    _RandomZoomOut(scale=(0.8, 1.0), p=0.3),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    transforms.RandomAffine(
+                        degrees=10, translate=(0.02, 0.02), scale=(0.95, 1.05), fill=0
+                    ),
+                    transforms.ColorJitter(brightness=0.1, contrast=0.1),
+                ]
             elif self.aug == "strong":
                 ops = [
                     transforms.RandomResizedCrop(
@@ -144,7 +184,7 @@ class GlaucomaDataset(Dataset):
         return len(self.names)
 
     def _load_image(self, path: str) -> Image.Image:
-        zoom = self.train and self.aug == "zoom"
+        zoom = self.train and self.aug in ("zoom", "zoomrobust")
         target = 1024 if (self.fov_crop or zoom) else self.image_size
         with Image.open(path) as im:
             im.draft("RGB", (target, target))

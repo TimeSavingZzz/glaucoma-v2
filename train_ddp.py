@@ -64,6 +64,44 @@ class ModelEMA:
                 v.copy_(msd[k])
 
 
+class SWADStats:
+    """SWAD 权重累加器：对（最后一段 epoch 的）参数做均匀平均。
+
+    与 EMA 互补：EMA 是指数平均、偏向近期；SWAD 是等权平均、落在低损失平坦区域。
+    只在 rank0 维护，不引入任何跨进程通信；评估用一份独立副本。
+    """
+
+    def __init__(self) -> None:
+        self.sum_sd: dict[str, torch.Tensor] = {}
+        self.n = 0
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        msd = unwrap(model).state_dict()
+        if not self.sum_sd:
+            for k, v in msd.items():
+                if v.dtype.is_floating_point:
+                    self.sum_sd[k] = v.detach().float().clone()
+                else:
+                    self.sum_sd[k] = v.detach().clone()
+        else:
+            for k, v in msd.items():
+                if self.sum_sd[k].dtype.is_floating_point:
+                    self.sum_sd[k].add_(v.detach().float())
+        self.n += 1
+
+    def averaged(self):
+        if self.n == 0:
+            return None
+        out = {}
+        for k, v in self.sum_sd.items():
+            if v.dtype.is_floating_point:
+                out[k] = (v / self.n).to(torch.float32)
+            else:
+                out[k] = v.clone()
+        return out
+
+
 def make_optimizer(model: nn.Module, lr: float, wd: float):
     decay, no_decay = [], []
     for n, p in unwrap(model).named_parameters():
@@ -150,12 +188,17 @@ def main() -> None:
     parser.add_argument("--patience", type=int, default=4)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=SEED)
-    parser.add_argument("--aug", default="geo2", choices=["basic", "geo", "geo2", "zoom"])
-    parser.add_argument("--input-mode", default="rgb", choices=["rgb", "green", "gray"])
+    parser.add_argument("--aug", default="geo2", choices=["basic", "geo", "geo2", "zoom", "zoomrobust", "strong"])
+    parser.add_argument("--input-mode", default="rgb", choices=["rgb", "green", "gray", "clahe"])
     parser.add_argument("--fov-crop", action="store_true")
     parser.add_argument("--drop-path", type=float, default=0.1)
     parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--no-ema", action="store_true")
+    parser.add_argument("--swad", action="store_true",
+                        help="低学习率阶段密集权重平均（SWAD），rank0 保存 best_swad.pt")
+    parser.add_argument("--swad-start", type=float, default=0.65,
+                        help="从第几比例 epoch 开始平均（默认 0.65，即最后 35%%）")
+    parser.add_argument("--swad-every", type=int, default=20, help="每多少优化步平均一次")
     parser.add_argument("--syncbn", action="store_true",
                         help="DDP 下转 SyncBatchNorm（默认关闭，单卡 BN 更稳）")
     parser.add_argument("--amp", dest="amp", action="store_true", default=True)
@@ -282,6 +325,12 @@ def main() -> None:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank,
                     find_unused_parameters=False)
     ema = None if args.no_ema else ModelEMA(model, args.ema_decay)
+    swad = SWADStats() if (is_main and args.swad) else None
+    swad_eval_model = deepcopy(unwrap(model)).eval() if swad is not None else None
+    if swad_eval_model is not None:
+        for p_ in swad_eval_model.parameters():
+            p_.requires_grad_(False)
+    swad_start_epoch = max(1, int(round(args.epochs * args.swad_start)))
 
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smooth)
     optimizer = make_optimizer(model, args.lr, args.weight_decay)
@@ -296,10 +345,11 @@ def main() -> None:
         metrics_file = open(run_dir / "metrics.csv", "w", newline="", encoding="utf-8")
         writer = csv.writer(metrics_file)
         writer.writerow(["epoch", "train_loss", "valid_auroc", "valid_ap", "valid_logloss",
-                         "valid_acc", "ema_ap", "lr", "sec"])
+                         "valid_acc", "ema_ap", "swad_ap", "lr", "sec"])
         metrics_file.flush()
 
     best_ap, best_ap_epoch = -1.0, 0
+    best_swad_epoch = 0
     best_au, best_au_epoch = -1.0, 0
     bad = 0
     global_step = 0
@@ -344,6 +394,9 @@ def main() -> None:
                 global_step += 1
                 if ema is not None:
                     ema.update(model)
+                if (swad is not None and epoch >= swad_start_epoch
+                        and global_step % args.swad_every == 0):
+                    swad.update(model)
             running += loss.item() * args.accum
             count += 1
             if is_main and step % 200 == 0:
@@ -365,22 +418,29 @@ def main() -> None:
                           run_dir / "last_ema.pt")
             sec = time.perf_counter() - ep_start
             log(f"epoch {epoch}/{args.epochs} loss={train_loss:.4f} ({sec:.0f}s, no valid)")
-            writer.writerow([epoch, f"{train_loss:.5f}", "", "", "", "", "",
+            writer.writerow([epoch, f"{train_loss:.5f}", "", "", "", "", "", "",
                              f"{optimizer.param_groups[0]['lr']:.2e}", f"{sec:.1f}"])
             metrics_file.flush()
         elif is_main:
             metrics = evaluate(unwrap(model), val_loader, device)
             ema_metrics = evaluate(ema.ema, val_loader, device) if ema is not None else None
+            swad_metrics = None
+            swad_avg = swad.averaged() if swad is not None else None
+            if swad_avg is not None:
+                swad_eval_model.load_state_dict(swad_avg)
+                swad_metrics = evaluate(swad_eval_model, val_loader, device)
             sec = time.perf_counter() - ep_start
             log(f"epoch {epoch}/{args.epochs} loss={train_loss:.4f} "
                 f"AP={metrics['ap']:.4f} AUROC={metrics['auroc']:.4f} "
                 + (f"EMA_AP={ema_metrics['ap']:.4f} EMA_AUROC={ema_metrics['auroc']:.4f} "
                    if ema_metrics else "")
+                + (f"SWAD_AP={swad_metrics['ap']:.4f} " if swad_metrics else "")
                 + f"({sec:.0f}s)")
             writer.writerow([epoch, f"{train_loss:.5f}", f"{metrics['auroc']:.6f}",
                              f"{metrics['ap']:.6f}", f"{metrics['logloss']:.6f}",
                              f"{metrics['acc']:.6f}",
                              f"{ema_metrics['ap']:.6f}" if ema_metrics else "",
+                             f"{swad_metrics['ap']:.6f}" if swad_metrics else "",
                              f"{optimizer.param_groups[0]['lr']:.2e}", f"{sec:.1f}"])
             metrics_file.flush()
 
@@ -398,6 +458,11 @@ def main() -> None:
                 save_ckpt({**base, "model": ema.ema.state_dict(), "epoch": epoch,
                            "metrics": ema_metrics, "ema": True, "exp_id": args.exp_id},
                           run_dir / "best_ap.pt")
+            if swad_metrics and swad_metrics["ap"] > best_ap:
+                best_ap, best_swad_epoch = swad_metrics["ap"], epoch
+                save_ckpt({**base, "model": swad_eval_model.state_dict(), "epoch": epoch,
+                           "metrics": swad_metrics, "ema": False, "swad": True,
+                           "exp_id": args.exp_id}, run_dir / "best_ap.pt")
             if metrics["auroc"] > best_au:
                 best_au, best_au_epoch = metrics["auroc"], epoch
                 save_ckpt({**base, "model": raw_sd, "epoch": epoch, "metrics": metrics,
@@ -405,7 +470,8 @@ def main() -> None:
             save_ckpt({**base, "model": raw_sd, "epoch": epoch, "metrics": metrics,
                        "ema": False, "exp_id": args.exp_id}, run_dir / "last.pt")
 
-            cur_best = max(metrics["ap"], ema_metrics["ap"] if ema_metrics else -1.0)
+            cur_best = max(metrics["ap"], ema_metrics["ap"] if ema_metrics else -1.0,
+                           swad_metrics["ap"] if swad_metrics else -1.0)
             if cur_best > prev_best + 1e-9:
                 bad = 0
             else:
@@ -421,7 +487,8 @@ def main() -> None:
             break
 
     if is_main:
-        log(f"DONE best_AP={best_ap:.6f}@e{best_ap_epoch} best_AUROC={best_au:.6f}@e{best_au_epoch} "
+        log(f"DONE best_AP={best_ap:.6f}@e{best_ap_epoch} best_SWAD_e{best_swad_epoch} "
+            f"best_AUROC={best_au:.6f}@e{best_au_epoch} "
             f"total={(time.perf_counter() - start) / 60:.1f}min")
         metrics_file.close()
         log_file.close()
