@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from sklearn.metrics import average_precision_score, log_loss, roc_auc_score
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
@@ -19,6 +20,27 @@ MEAN = (0.485, 0.456, 0.406)
 STD = (0.229, 0.224, 0.225)
 
 
+def _zoom_out(x: torch.Tensor, f: float = 0.12) -> torch.Tensor:
+    """黑边回填后缩回原尺寸 = 缩小视野内容（模拟 test 图内容偏大/偏小）"""
+    s = x.shape[-1]
+    p = max(1, int(round(s * f)))
+    b, c, h, w = x.shape
+    val = torch.tensor([-m / st for m, st in zip(MEAN, STD)],
+                       device=x.device, dtype=x.dtype).view(1, c, 1, 1)
+    out = val.expand(b, c, h + 2 * p, w + 2 * p).clone()
+    out[:, :, p:p + h, p:p + w] = x
+    return F.interpolate(out, size=(s, s), mode="bilinear", align_corners=False)
+
+
+def _zoom_in(x: torch.Tensor, f: float = 0.84) -> torch.Tensor:
+    """中心裁剪后放大回原尺寸（模拟内容偏小需要放大）"""
+    s = x.shape[-1]
+    c = int(round(s * f))
+    o = (s - c) // 2
+    return F.interpolate(x[:, :, o:o + c, o:o + c], size=(s, s),
+                         mode="bilinear", align_corners=False)
+
+
 def tta_views(x: torch.Tensor, strategy: str) -> list[torch.Tensor]:
     views = [x]
     if "h" in strategy:
@@ -27,6 +49,10 @@ def tta_views(x: torch.Tensor, strategy: str) -> list[torch.Tensor]:
         views.append(torch.flip(x, dims=[2]))
     if strategy in ("hv", "vh"):
         views.append(torch.flip(x, dims=[2, 3]))
+    if "o" in strategy:
+        views.append(_zoom_out(x))
+    if "i" in strategy:
+        views.append(_zoom_in(x))
     return views
 
 
