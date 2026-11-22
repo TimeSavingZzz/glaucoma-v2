@@ -54,6 +54,15 @@ SPEC = {
     "zr_r50l_hv": ("zr_r50l", 4, 45),
     "zr_em_none": ("zr_em", 1, 102), "zr_em_hflip": ("zr_em", 2, 102),
     "zr_em_hv": ("zr_em", 4, 102),
+    # 2026-11-22 第二波
+    "r50long20_none": ("r50long20", 1, 45), "r50long20_hflip": ("r50long20", 2, 45),
+    "r50long20_hv": ("r50long20", 4, 45),
+    "emstrong_none": ("emstrong", 1, 102), "emstrong_hflip": ("emstrong", 2, 102),
+    "emstrong_hv": ("emstrong", 4, 102),
+    "cnvslong_none": ("cnvslong", 1, 95), "cnvslong_hflip": ("cnvslong", 2, 95),
+    "cnvslong_hv": ("cnvslong", 4, 95),
+    "em3long3_none": ("em3long3", 1, 102), "em3long3_hflip": ("em3long3", 2, 102),
+    "em3long3_hv": ("em3long3", 4, 102),
 }
 
 # 部署时 predict_and_cost 要求所有模型 fov_crop/input_mode 一致：
