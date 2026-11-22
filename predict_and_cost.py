@@ -171,29 +171,31 @@ def views(x: torch.Tensor, tta: str) -> list[torch.Tensor]:
     raise ValueError(f"未知 TTA: {tta}")
 
 
-def predict_logits(models, strategies, infos, norms, x, weights=None) -> torch.Tensor:
-    """返回 [模型数, batch] 的加权 logit；x 为未归一化 [0,1] 图像。"""
-    if weights is None:
-        weights = [1.0] * len(models)
+def predict_logits(models, strategies, infos, norms, x) -> torch.Tensor:
+    """返回 [模型数, batch] 的未加权 logit；x 为未归一化 [0,1] 图像。"""
     if not isinstance(x, dict):
         x = {infos[0]["image_size"]: x}
     model_logits = []
-    for model, strategy, inf, (mean, std), w in zip(models, strategies, infos, norms, weights):
+    for model, strategy, inf, (mean, std) in zip(models, strategies, infos, norms):
         xb = x[inf["image_size"]]
         vs = [(v - mean) / std for v in views(xb, strategy)]
         dtype = next(model.parameters()).dtype
         batch = torch.cat(vs, dim=0).to(dtype=dtype).contiguous(memory_format=torch.channels_last)
         probs = torch.softmax(model(batch).float(), dim=1)[:, 1].view(len(vs), xb.size(0))
-        model_logits.append(w * torch.logit(probs.mean(dim=0).clamp(1e-6, 1 - 1e-6)))
+        model_logits.append(torch.logit(probs.mean(dim=0).clamp(1e-6, 1 - 1e-6)))
     return torch.stack(model_logits, dim=0)
+
+
+def _blend(logits: torch.Tensor, weights) -> torch.Tensor:
+    w = torch.tensor(weights, dtype=torch.float32, device=logits.device).view(-1, 1)
+    return torch.sigmoid((w * logits).sum(0) / float(sum(weights)))
 
 
 def predict_prob(models, strategies, infos, norms, x, weights=None) -> torch.Tensor:
     """x 为未归一化的 [0,1] 图像（单尺寸 Tensor 或 {size: Tensor}）；各模型按自身配置归一化。"""
     if weights is None:
         weights = [1.0] * len(models)
-    return torch.sigmoid(predict_logits(models, strategies, infos, norms, x, weights).sum(0)
-                         / float(sum(weights)))
+    return _blend(predict_logits(models, strategies, infos, norms, x), weights)
 
 
 def resolve_paths(data_root: Path, names: list[str]) -> list[Path]:
@@ -279,12 +281,13 @@ def main() -> None:
     with torch.inference_mode():
         for batch in loader:
             xs = {s: t.to(device, non_blocking=True) for s, t in batch.items()}
-            logits.append(predict_logits(models, strategies, infos, norms, xs, weights).cpu())
-    L = torch.cat(logits, dim=1).float().numpy()
+            logits.append(predict_logits(models, strategies, infos, norms, xs).cpu())
+    L = torch.cat(logits, dim=1).float()
     if args.zscore:
-        L = (L - L.mean(axis=1, keepdims=True)) / (L.std(axis=1, keepdims=True) + 1e-12)
+        # 先逐模型标准化（无权重），再加权，避免权重被标准化抵消
+        L = (L - L.mean(dim=1, keepdim=True)) / (L.std(dim=1, keepdim=True) + 1e-12)
         print("zscore 融合：按 test 自身逐模型 logit 标准化")
-    prob = 1.0 / (1.0 + np.exp(-(L.sum(axis=0) / float(sum(weights)))))
+    prob = _blend(L, weights).numpy()
     frame = pd.DataFrame({"Image_name": names,
                           "Probability": np.round(prob, 9),
                           "Pred_Label": (prob >= args.threshold).astype(np.int64)})

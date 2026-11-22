@@ -56,9 +56,13 @@ SPEC = {
     "zr_em_hv": ("zr_em", 4, 102),
 }
 
+# 部署时 predict_and_cost 要求所有模型 fov_crop/input_mode 一致：
+# r50fov（fov_crop=True）与 clahe_em（input_mode=clahe）不能和主组混合导出，故排除。
 EXCLUDE = {"cnxb384_none", "cnxb384_hv", "swinb384_none", "swinb384_hv",
            "soup_em4b_none", "soup_em4b_hv", "r50grn_none", "r50grn_hv",
-           "exp09_640_none", "exp09_640_hflip", "exp09_640_hv"}
+           "exp09_640_none", "exp09_640_hflip", "exp09_640_hv",
+           "r50fov_none", "r50fov_hv",
+           "clahe_em_none", "clahe_em_hflip", "clahe_em_hv"}
 
 MAX_MODELS, MAX_VIEWS, MAX_MB = 5, 8, 500
 WEIGHTS = (1, 2, 3)
