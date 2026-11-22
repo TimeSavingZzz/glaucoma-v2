@@ -33,6 +33,15 @@ SPEC = {
     "r50grn_none": ("r50grn", 1, 45), "r50grn_hv": ("r50grn", 4, 45),
     "swinb384_none": ("swinb384", 1, 166), "swinb384_hv": ("swinb384", 4, 166),
     "soup_em4b_none": ("soup", 1, 102), "soup_em4b_hv": ("soup", 4, 102),
+    # 2026-11-21 夜 16 轮配方（lr 1e-4 + SWAD）
+    "emlong_none": ("emlong", 1, 102), "emlong_hflip": ("emlong", 2, 102),
+    "emlong_hv": ("emlong", 4, 102),
+    "em3long_none": ("em3long", 1, 102), "em3long_hflip": ("em3long", 2, 102),
+    "em3long_hv": ("em3long", 4, 102),
+    "r50long_none": ("r50long", 1, 45), "r50long_hflip": ("r50long", 2, 45),
+    "r50long_hv": ("r50long", 4, 45),
+    "exp09_640_none": ("exp09_640", 1, 45), "exp09_640_hflip": ("exp09_640", 2, 45),
+    "exp09_640_hv": ("exp09_640", 4, 45),
 }
 
 MAX_MODELS = 5
@@ -48,7 +57,8 @@ def zlogit(p):
 
 # 弱成员/冗余成员不进入搜索（cnxb384、swin、soup、r50grn 单模明显弱）
 EXCLUDE = {"cnxb384_none", "cnxb384_hv", "swinb384_none", "swinb384_hv",
-           "soup_em4b_none", "soup_em4b_hv", "r50grn_none", "r50grn_hv"}
+           "soup_em4b_none", "soup_em4b_hv", "r50grn_none", "r50grn_hv",
+           "exp09_640_none", "exp09_640_hflip", "exp09_640_hv"}
 
 
 def load_dir(directory: Path):
