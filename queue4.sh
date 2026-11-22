@@ -1,5 +1,5 @@
 #!/bin/bash
-# 队列 4：等 queue3 结束 -> ConvNeXt-S 16 轮（架构多样性）-> EM3LONG 第三种子。
+# 队列 4：等 queue3 -> EXP-46 zoomrobust 三连（公榜尺度鲁棒性优先）-> ConvNeXt-S -> EM3LONG 第三种子。
 # 日志 /mnt/glaucoma/runs/queue4.log
 set -u
 R=/mnt/glaucoma/runs
@@ -54,6 +54,25 @@ echo "=== queue4 start $(date) ==="
 while pgrep -f "queue3.sh" >/dev/null; do sleep 60; done
 while pgrep -f "train_ddp.py" >/dev/null; do sleep 60; done
 echo "[$(date)] queue3 finished, GPUs free"
+
+# EXP-46 复刻：zoomrobust + ce_auc(≈CE+rank0.5) + pos_per_batch2(≈pos_weight4)
+run_one V2-ZR-R50 resnet50 \
+    --size 512 --epochs 8 --batch-size 8 --accum 1 --lr 1e-4 --weight-decay 0.02 \
+    --drop-path 0.1 --aug zoomrobust --rank-weight 0.5 --pos-weight 4 --patience 4 \
+    --seed 42 --swad || exit 1
+eval_ckpt V2-ZR-R50 zr_r50 || true
+
+run_one V2-ZR-R50L resnet50 \
+    --size 512 --epochs 16 --batch-size 8 --accum 1 --lr 1e-4 --weight-decay 0.02 \
+    --drop-path 0.1 --aug zoomrobust --rank-weight 0.5 --pos-weight 4 --patience 6 \
+    --seed 43 --swad || exit 1
+eval_ckpt V2-ZR-R50L zr_r50l || true
+
+run_one V2-ZR-EM tf_efficientnetv2_m.in21k_ft_in1k \
+    --size 512 --epochs 16 --batch-size 8 --accum 1 --lr 1e-4 --weight-decay 0.02 \
+    --drop-path 0.1 --aug zoomrobust --rank-weight 0.5 --pos-weight 4 --patience 6 \
+    --seed 44 --swad || exit 1
+eval_ckpt V2-ZR-EM zr_em || true
 
 run_one V2-CNVS-LONG convnext_small.fb_in22k_ft_in1k \
     --size 512 --epochs 16 --batch-size 8 --accum 1 --lr 1e-4 --weight-decay 0.02 \

@@ -1,16 +1,20 @@
 """部署约束下的 beam search 融合（模型 ≤5、TTA 视图 ≤8、fp16 权重 ≤500MB）。
 
-穷举权重网格在成员变多后组合爆炸；改用按 AP 排序的束搜索：
-每层给状态追加一个成员（权重 1/2/3，同一模型的不同 TTA 变体不能同时入选），
-保留 AP 最高的 K 个状态进入下一层。状态分值用 sum(w*logit)（AP 对单调变换不变）。
+支持两种融合口径（--mode）：
+- raw   ：加权 sum(logit)。valid 上历史最优。
+- zscore：每个成员先在自己这一 split 内的 logit 上做 z-score 标准化再加权。
+          旧项目 EXP-46 实测 z-score 融合公榜更稳（跨域时按各模型自身分布对齐）。
+  部署时 test 端用 test 自身预测的均值/方差标准化（无监督，不违反规则）。
 
-用法：python beam_ens.py --dir /mnt/glaucoma/runs [--beam 40]
+每层给状态追加一个成员（权重 1/2/3，同一模型的不同 TTA 变体不能同时入选），
+保留 AP 最高的 K 个状态进入下一层。AP 对单调变换不变，故用加权 sum 排序即可。
+
+用法：python beam_ens.py --dir /mnt/glaucoma/runs [--beam 40] [--mode raw|zscore]
 """
 
 from __future__ import annotations
 
 import argparse
-import itertools
 from pathlib import Path
 
 import numpy as np
@@ -35,13 +39,23 @@ SPEC = {
     "emlong_hv": ("emlong", 4, 102),
     "em3long_none": ("em3long", 1, 102), "em3long_hflip": ("em3long", 2, 102),
     "em3long_hv": ("em3long", 4, 102),
+    "em3long2_none": ("em3long2", 1, 102), "em3long2_hflip": ("em3long2", 2, 102),
+    "em3long2_hv": ("em3long2", 4, 102),
     "r50long_none": ("r50long", 1, 45), "r50long_hflip": ("r50long", 2, 45),
     "r50long_hv": ("r50long", 4, 45),
     "exp09_640_none": ("exp09_640", 1, 45), "exp09_640_hflip": ("exp09_640", 2, 45),
     "exp09_640_hv": ("exp09_640", 4, 45),
     "clahe_em_none": ("clahe_em", 1, 102), "clahe_em_hflip": ("clahe_em", 2, 102),
     "clahe_em_hv": ("clahe_em", 4, 102),
+    # EXP-46 zoomrobust 系列
+    "zr_r50_none": ("zr_r50", 1, 45), "zr_r50_hflip": ("zr_r50", 2, 45),
+    "zr_r50_hv": ("zr_r50", 4, 45),
+    "zr_r50l_none": ("zr_r50l", 1, 45), "zr_r50l_hflip": ("zr_r50l", 2, 45),
+    "zr_r50l_hv": ("zr_r50l", 4, 45),
+    "zr_em_none": ("zr_em", 1, 102), "zr_em_hflip": ("zr_em", 2, 102),
+    "zr_em_hv": ("zr_em", 4, 102),
 }
+
 EXCLUDE = {"cnxb384_none", "cnxb384_hv", "swinb384_none", "swinb384_hv",
            "soup_em4b_none", "soup_em4b_hv", "r50grn_none", "r50grn_hv",
            "exp09_640_none", "exp09_640_hflip", "exp09_640_hv"}
@@ -55,12 +69,15 @@ def zlogit(p):
     return np.log(p / (1 - p))
 
 
-def load(directory: Path):
+def load(directory: Path, zscore: bool):
     out = {}
     for f in sorted(directory.glob("*.npz")):
         if f.stem in SPEC and f.stem not in EXCLUDE:
             d = np.load(f)
-            out[f.stem] = (zlogit(d["probs"].astype(np.float64)), d["labels"])
+            z = zlogit(d["probs"].astype(np.float64))
+            if zscore:
+                z = (z - z.mean()) / (z.std() + 1e-12)
+            out[f.stem] = (z, d["labels"])
     return out
 
 
@@ -78,14 +95,14 @@ def main() -> None:
     ap.add_argument("--dir", default="/mnt/glaucoma/runs")
     ap.add_argument("--beam", type=int, default=40)
     ap.add_argument("--show", type=int, default=15)
+    ap.add_argument("--mode", default="raw", choices=["raw", "zscore"])
     args = ap.parse_args()
 
-    data = load(Path(args.dir))
+    data = load(Path(args.dir), args.mode == "zscore")
     stems = list(data)
     y = data[stems[0]][1]
-    print(f"候选 {len(stems)} 个，valid n={len(y)} pos={int(y.sum())}")
+    print(f"[{args.mode}] 候选 {len(stems)} 个，valid n={len(y)} pos={int(y.sum())}")
 
-    # 状态: (view_count, mb, used_models frozenset, [(stem, weight)], z)
     beam = [(-1.0, 0, 0, frozenset(), (), None)]
     seen = []
     for depth in range(1, MAX_MODELS + 1):
@@ -98,12 +115,12 @@ def main() -> None:
                 for w in WEIGHTS:
                     zn = w * data[s][0] if z is None else z + w * data[s][0]
                     a = average_precision_score(y, zn)
-                    nxt.append((a, views + v, mb + m, used | {model}, comp + ((s, w),), zn))
+                    nxt.append((a, views + v, mb + m, used | {model},
+                                comp + ((s, w),), zn))
         neval = len(nxt)
-        # 去重：同一 (组件集合) 只留最高分
         name = {}
         for st in nxt:
-            key = tuple(sorted(st[4]))
+            key = tuple(sorted((c[0], c[1]) for c in st[4]))
             if key not in name or st[0] > name[key][0]:
                 name[key] = st
         uniq = sorted(name.values(), key=lambda t: -t[0])[: args.beam]
@@ -117,16 +134,16 @@ def main() -> None:
 
     final = {}
     for st in seen:
-        key = tuple(sorted(st[4]))
+        key = tuple(sorted((c[0], c[1]) for c in st[4]))
         if key not in final or st[0] > final[key][0]:
             final[key] = st
     rows = sorted(final.values(), key=lambda t: -t[0])[: args.show]
-    print("\n最终前排名单（同一 valid，选型乐观）：")
+    print(f"\n[{args.mode}] 最终前排名单（同一 valid，选型乐观）：")
     for a, views, mb, used, comp, z in rows:
         print(f"AP={a:.6f} AUROC={roc_auc_score(y, z):.6f} views={views} MB={mb} :: "
               + " ".join(f"{w}x{s}" for s, w in comp))
     top = rows[0]
-    print(f"\n最佳 bootstrap CI={bootstrap_ap(y, top[5])}")
+    print(f"\n[{args.mode}] 最佳 bootstrap CI={bootstrap_ap(y, top[5])}")
 
 
 if __name__ == "__main__":
