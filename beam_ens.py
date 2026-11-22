@@ -63,6 +63,18 @@ SPEC = {
     "cnvslong_hv": ("cnvslong", 4, 95),
     "em3long3_none": ("em3long3", 1, 102), "em3long3_hflip": ("em3long3", 2, 102),
     "em3long3_hv": ("em3long3", 4, 102),
+    "zrft_em_none": ("zrft_em", 1, 102), "zrft_em_hflip": ("zrft_em", 2, 102),
+    "zrft_em_hv": ("zrft_em", 4, 102),
+    "zrft_r50_none": ("zrft_r50", 1, 45), "zrft_r50_hflip": ("zrft_r50", 2, 45),
+    "zrft_r50_hv": ("zrft_r50", 4, 45),
+    "zr_em2_none": ("zr_em2", 1, 102), "zr_em2_hflip": ("zr_em2", 2, 102),
+    "zr_em2_hv": ("zr_em2", 4, 102),
+    "r50long3_none": ("r50long3", 1, 45), "r50long3_hflip": ("r50long3", 2, 45),
+    "r50long3_hv": ("r50long3", 4, 45),
+    "r50_640_none": ("r50_640", 1, 45), "r50_640_hflip": ("r50_640", 2, 45),
+    "r50_640_hv": ("r50_640", 4, 45),
+    "em3long4_none": ("em3long4", 1, 102), "em3long4_hflip": ("em3long4", 2, 102),
+    "em3long4_hv": ("em3long4", 4, 102),
 }
 
 # 部署时 predict_and_cost 要求所有模型 fov_crop/input_mode 一致：
