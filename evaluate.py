@@ -42,16 +42,21 @@ def _zoom_in(x: torch.Tensor, f: float = 0.84) -> torch.Tensor:
 
 
 def tta_views(x: torch.Tensor, strategy: str) -> list[torch.Tensor]:
+    """strategy 用 + 连接 token：h=水平翻转, v=垂直翻转, zo=zoom-out, zi=zoom-in。
+    兼容旧写法 none/hflip/hv/vh。"""
+    toks = set(strategy.split("+"))
     views = [x]
-    if "h" in strategy:
+    h = strategy in ("hflip", "h", "hv", "vh") or "h" in toks
+    v = strategy in ("hv", "vh") or "v" in toks
+    if h:
         views.append(torch.flip(x, dims=[3]))
-    if "v" in strategy:
+    if v:
         views.append(torch.flip(x, dims=[2]))
-    if strategy in ("hv", "vh"):
+    if h and v:
         views.append(torch.flip(x, dims=[2, 3]))
-    if "o" in strategy:
+    if "zo" in toks:
         views.append(_zoom_out(x))
-    if "i" in strategy:
+    if "zi" in toks:
         views.append(_zoom_in(x))
     return views
 
