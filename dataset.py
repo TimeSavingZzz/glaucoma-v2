@@ -17,7 +17,7 @@ from config import IMAGENET_MEAN, IMAGENET_STD
 from fov import crop_to_square
 from preprocess import clahe_rgb
 
-AUG_MODES = ("basic", "geo", "geo2", "zoom", "zoomrobust", "strong")
+AUG_MODES = ("basic", "geo", "geo2", "zoom", "zoomrobust", "zoomout", "zoomoutstrong", "strong")
 
 
 def _index_images(image_dir: Path) -> dict[str, str]:
@@ -158,6 +158,34 @@ class GlaucomaDataset(Dataset):
                     ),
                     transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.2, hue=0.03),
                     transforms.RandAugment(num_ops=2, magnitude=7),
+                ]
+            elif self.aug == "zoomout":
+                # 温和尺度扰动：geo2 + 50% 概率缩小到 88-100% 黑边回填
+                ops = [
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    transforms.RandomAffine(
+                        degrees=12, translate=(0.03, 0.03), scale=(0.93, 1.07),
+                        shear=3, fill=0,
+                    ),
+                    transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10, hue=0.02),
+                    _RandomZoomOut(scale=(0.88, 1.0), p=0.5),
+                ]
+            elif self.aug == "zoomoutstrong":
+                ops = [
+                    transforms.RandomResizedCrop(
+                        image_size, scale=(0.7, 1.0), ratio=(0.85, 1.15),
+                        interpolation=transforms.InterpolationMode.BILINEAR,
+                    ),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    transforms.RandomAffine(
+                        degrees=15, translate=(0.04, 0.04), scale=(0.9, 1.1),
+                        shear=5, fill=0,
+                    ),
+                    transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.2, hue=0.03),
+                    transforms.RandAugment(num_ops=2, magnitude=7),
+                    _RandomZoomOut(scale=(0.88, 1.0), p=0.5),
                 ]
             else:  # zoom
                 ops = [

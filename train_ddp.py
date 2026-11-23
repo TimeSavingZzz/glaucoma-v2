@@ -188,7 +188,7 @@ def main() -> None:
     parser.add_argument("--patience", type=int, default=4)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=SEED)
-    parser.add_argument("--aug", default="geo2", choices=["basic", "geo", "geo2", "zoom", "zoomrobust", "strong"])
+    parser.add_argument("--aug", default="geo2", choices=["basic", "geo", "geo2", "zoom", "zoomrobust", "zoomout", "zoomoutstrong", "strong"])
     parser.add_argument("--input-mode", default="rgb", choices=["rgb", "green", "gray", "clahe"])
     parser.add_argument("--fov-crop", action="store_true")
     parser.add_argument("--drop-path", type=float, default=0.1)
